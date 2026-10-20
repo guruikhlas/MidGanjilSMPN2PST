@@ -390,30 +390,58 @@
     </div>
 
     <!-- APPLICATION LOGIC & REALTIME CLOUD DB -->
-    <script>
-        // Dedicated Global Realtime Cloud Store Bin ID (Shared between teacher laptop and student mobile)
-        const CLOUD_STORE_ENDPOINT = 'https://api.jsonbin.io/v3/b/66d8b9dce41b4d34e428c9b2';
-        const CLOUD_STORE_KEY = '$2a$10$wT8B1Kx9kE1j.yW0N0h5Ou0I9e0x5d3yJ0f2yB1Kx9kE1j.yW0N0h';
+    <script type="module">
+        // Firebase Modular SDK Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { 
+            getFirestore, 
+            collection, 
+            onSnapshot, 
+            doc, 
+            setDoc, 
+            deleteDoc, 
+            addDoc, 
+            query, 
+            orderBy, 
+            serverTimestamp 
+        } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
-        // Master Initial Dataset
+        // Configuration for Firebase Cloud Firestore
+        const firebaseConfig = {
+            apiKey: "AIzaSyD-placeholder-key-for-smpn2percut",
+            authDomain: "smpn2percut.firebaseapp.com",
+            projectId: "smpn2percut",
+            storageBucket: "smpn2percut.appspot.com",
+            messagingSenderId: "1234567890",
+            appId: "1:1234567890:web:abcdef123456"
+        };
+
+        let app, db;
+        let isFirebaseConnected = false;
+
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            isFirebaseConnected = true;
+        } catch (e) {
+            console.error("Firebase init failed, fallback to local:", e);
+        }
+
+        // Master Initial Fallback Dataset
         const INITIAL_DATA = [
             { id: "S001", kelas: "IX-1", absen: 1, nama: "Ahmad Rizky", t1: 85, t2: 90, mid: 88 },
             { id: "S002", kelas: "IX-1", absen: 2, nama: "Aisyah Putri", t1: 92, t2: 95, mid: 94 },
-            { id: "S003", kelas: "IX-1", absen: 3, nama: "adit", t1: 87, t2: 85, mid: 88 },
+            { id: "S003", kelas: "IX-1", absen: 3, nama: "Adit", t1: 87, t2: 85, mid: 88 },
             { id: "S004", kelas: "IX-1", absen: 4, nama: "Arya", t1: 80, t2: 87, mid: 85 },
             { id: "S005", kelas: "IX-2", absen: 1, nama: "Budi Santoso", t1: 78, t2: 80, mid: 75 },
-            { id: "S006", kelas: "IX-2", absen: 2, nama: "Citra Dewi", t1: 88, t2: 85, mid: 90 },
-            { id: "S007", kelas: "IX-3", absen: 1, nama: "Dedi Setiawan", t1: 65, t2: 70, mid: 68 },
-            { id: "S008", kelas: "IX-4", absen: 1, nama: "Eka Rahmawati", t1: 55, t2: 60, mid: 58 }
+            { id: "S006", kelas: "IX-2", absen: 2, nama: "Citra Dewi", t1: 88, t2: 85, mid: 90 }
         ];
 
-        // State
         let database = [...INITIAL_DATA];
         let logsList = [];
         let currentUser = null;
         let pendingAction = null;
 
-        // Load local fallback
         function loadLocalData() {
             const savedData = localStorage.getItem('smpn2_nilai_db');
             if (savedData) {
@@ -430,38 +458,82 @@
             localStorage.setItem('smpn2_logs_db', JSON.stringify(logsList));
         }
 
-        // Realtime Sync to Cloud Storage Server
-        async function fetchCloudData() {
-            try {
-                const res = await fetch(CLOUD_STORE_ENDPOINT + '/latest', {
-                    headers: { 'X-Master-Key': CLOUD_STORE_KEY }
-                });
-                if (res.ok) {
-                    const result = await res.json();
-                    if (result.record && Array.isArray(result.record)) {
-                        database = result.record;
-                        saveLocalData();
-                        return true;
-                    }
-                }
-            } catch (err) {
-                console.log("Cloud fetch fallback to local:", err);
+        function initRealtimeListeners() {
+            if (!isFirebaseConnected || !db) {
+                updateSyncBadge(false, "Mode Lokal (Offline)");
+                return;
             }
-            return false;
+
+            const badgeEl = document.getElementById('cloud-sync-badge');
+            if (badgeEl) {
+                badgeEl.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span> Menghubungkan Firebase...`;
+            }
+
+            try {
+                const siswaRef = collection(db, "siswa");
+                onSnapshot(siswaRef, (snapshot) => {
+                    if (!snapshot.empty) {
+                        const cloudData = [];
+                        snapshot.forEach((docSnap) => {
+                            cloudData.push({ id: docSnap.id, ...docSnap.data() });
+                        });
+                        database = cloudData;
+                        saveLocalData();
+                        if (currentUser?.role === 'GURU') renderGuruTable();
+                    } else if (database.length > 0) {
+                        seedInitialDataToFirebase();
+                    }
+                    updateSyncBadge(true, "Firebase Realtime Aktif");
+                }, (error) => {
+                    console.error("Firestore Listen Error:", error);
+                    updateSyncBadge(false, "Gagal Koneksi Cloud");
+                });
+
+                const logsRef = collection(db, "logs");
+                const logsQuery = query(logsRef, orderBy("timestamp", "desc"));
+                onSnapshot(logsQuery, (snapshot) => {
+                    const cloudLogs = [];
+                    snapshot.forEach((docSnap) => {
+                        const data = docSnap.data();
+                        cloudLogs.push({
+                            waktu: data.waktu || new Date().toLocaleString('id-ID'),
+                            role: data.role,
+                            nama: data.nama,
+                            kelas: data.kelas,
+                            aktivitas: data.aktivitas
+                        });
+                    });
+                    logsList = cloudLogs;
+                    saveLocalData();
+                    if (currentUser?.role === 'GURU') renderLogsTable();
+                }, (err) => console.log("Logs stream error:", err));
+
+            } catch (err) {
+                console.error("Firestore connection failure:", err);
+                updateSyncBadge(false, "Terhubung Lokal");
+            }
         }
 
-        async function pushCloudData() {
+        async function seedInitialDataToFirebase() {
+            if (!db) return;
             try {
-                await fetch(CLOUD_STORE_ENDPOINT, {
-                    method: 'PUT',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Master-Key': CLOUD_STORE_KEY
-                    },
-                    body: JSON.stringify(database)
-                });
-            } catch (err) {
-                console.log("Cloud push info:", err);
+                for (const item of INITIAL_DATA) {
+                    await setDoc(doc(db, "siswa", item.id), item);
+                }
+            } catch (e) {
+                console.error("Failed seeding initial data:", e);
+            }
+        }
+
+        function updateSyncBadge(isOk, message) {
+            const badge = document.getElementById('cloud-sync-badge');
+            if (!badge) return;
+            if (isOk) {
+                badge.className = "text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-3 py-1 rounded-full font-semibold flex items-center gap-1.5";
+                badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> ${message}`;
+            } else {
+                badge.className = "text-xs bg-amber-500/20 text-amber-300 border border-amber-500/40 px-3 py-1 rounded-full font-semibold flex items-center gap-1.5";
+                badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> ${message}`;
             }
         }
 
@@ -534,10 +606,7 @@
 
         async function handleLoginSiswa(e) {
             e.preventDefault();
-            showToast("Memeriksa data nilai di cloud...", "info");
-            
-            // Sync cloud data first
-            await fetchCloudData();
+            showToast("Memeriksa data nilai...", "info");
 
             const kelasInput = document.getElementById('login-siswa-kelas').value.trim();
             const absenInput = parseInt(document.getElementById('login-siswa-absen').value, 10);
@@ -548,7 +617,6 @@
                 return;
             }
 
-            // Robust Flexible Match
             const found = database.find(s => {
                 const sameClass = String(s.kelas).trim().toUpperCase() === kelasInput.toUpperCase();
                 const sameAbsen = parseInt(s.absen, 10) === absenInput;
@@ -581,7 +649,6 @@
                 currentUser = { role: 'GURU', nama: namaGuru };
                 showToast(`Selamat bertugas, Bapak/Ibu ${namaGuru}`, 'success');
                 recordActivityLog('GURU', namaGuru, 'ALL', 'Masuk ke Dasbor Pengelolaan Nilai');
-                await fetchCloudData();
                 renderGuruDashboard();
             } else {
                 showToast("Kata sandi guru yang Anda masukkan salah!", "error");
@@ -728,8 +795,16 @@
             }
 
             const docData = { id, kelas, absen, nama, t1, t2, mid };
+
+            if (isFirebaseConnected && db) {
+                try {
+                    await setDoc(doc(db, "siswa", id), docData);
+                } catch (err) {
+                    console.error("Firestore setDoc failed:", err);
+                }
+            }
+
             const existingIndex = database.findIndex(s => s.id === id);
-            
             if (existingIndex >= 0) {
                 database[existingIndex] = docData;
             } else {
@@ -737,11 +812,9 @@
             }
 
             saveLocalData();
-            await pushCloudData();
-
             recordActivityLog('GURU', currentUser?.nama || 'Guru', kelas, idInput ? `Mengubah data ${nama}` : `Menambah siswa: ${nama}`);
             renderGuruTable();
-            showToast("Data siswa berhasil disimpan dan dikirim ke Cloud!", "success");
+            showToast("Data siswa berhasil disimpan dan disinkronkan ke Cloud!", "success");
             closeModal();
 
             if (submitBtn) { submitBtn.disabled = false; submitBtn.innerText = "Simpan Data"; }
@@ -776,9 +849,15 @@
             if (msgEl) msgEl.textContent = `Apakah Anda yakin ingin menghapus "${siswa.nama}" (Kelas ${siswa.kelas})?`;
 
             pendingAction = async function() {
+                if (isFirebaseConnected && db) {
+                    try {
+                        await deleteDoc(doc(db, "siswa", id));
+                    } catch (err) {
+                        console.error("Firestore deleteDoc failed:", err);
+                    }
+                }
                 database = database.filter(s => s.id !== id);
                 saveLocalData();
-                await pushCloudData();
                 recordActivityLog('GURU', currentUser?.nama || 'Guru', siswa.kelas, `Menghapus siswa: ${siswa.nama}`);
                 renderGuruTable();
                 showToast("Data siswa berhasil dihapus.", "info");
@@ -787,17 +866,30 @@
             document.getElementById('modal-confirm').classList.remove('hidden');
         }
 
-        function recordActivityLog(role, nama, kelas, aktivitas) {
+        async function recordActivityLog(role, nama, kelas, aktivitas) {
             const timeString = new Date().toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'medium' });
-            logsList.unshift({
+            const logItem = {
                 waktu: timeString,
                 role: role,
                 nama: nama || '-',
                 kelas: kelas || '-',
                 aktivitas: aktivitas
-            });
+            };
+
+            if (isFirebaseConnected && db) {
+                try {
+                    await addDoc(collection(db, "logs"), {
+                        ...logItem,
+                        timestamp: serverTimestamp()
+                    });
+                } catch (err) {
+                    console.error("Firestore addDoc log failed:", err);
+                }
+            }
+
+            logsList.unshift(logItem);
             saveLocalData();
-            renderLogsTable();
+            if (currentUser?.role === 'GURU') renderLogsTable();
         }
 
         function renderLogsTable() {
@@ -876,10 +968,9 @@
             setTimeout(() => toast.remove(), 4000);
         }
 
-        // Initialize listeners
-        window.addEventListener('DOMContentLoaded', async () => {
+        window.addEventListener('DOMContentLoaded', () => {
             loadLocalData();
-            await fetchCloudData();
+            initRealtimeListeners();
 
             document.getElementById('tab-btn-siswa')?.addEventListener('click', () => switchLoginTab('siswa'));
             document.getElementById('tab-btn-guru')?.addEventListener('click', () => switchLoginTab('guru'));
@@ -891,11 +982,9 @@
             document.getElementById('btn-download-pdf')?.addEventListener('click', downloadSiswaPDF);
             
             document.getElementById('btn-tambah-siswa')?.addEventListener('click', openTambahModal);
-            document.getElementById('btn-sync-cloud')?.addEventListener('click', async () => {
-                showToast("Menyinkronkan data dengan Cloud...", "info");
-                await fetchCloudData();
-                renderGuruTable();
-                showToast("Data Cloud berhasil disinkronkan!", "success");
+            document.getElementById('btn-sync-cloud')?.addEventListener('click', () => {
+                showToast("Menyinkronkan ulang Firebase...", "info");
+                initRealtimeListeners();
             });
 
             document.getElementById('btn-close-modal-siswa')?.addEventListener('click', closeModal);
